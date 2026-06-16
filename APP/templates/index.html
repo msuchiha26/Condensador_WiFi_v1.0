@@ -56,7 +56,7 @@ function supaHeaders() {
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Placa Fría 1</p><h2 id="c1">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Placa Fría 2</p><h2 id="c2">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Promedio Placas</p><h2 id="c12">--</h2></div>
-        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🎛️ PWM en Peltiers</p><h2 id="pwm">--</h2></div>
+        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🎛️ Energía en Peltiers</p><h2 id="pwm">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>⚡ Corriente en Peltiers</p><h2 id="corriente">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>💧 Punto de Rocío</p><h2 id="rocio">--</h2>
 </div>
@@ -585,7 +585,7 @@ async function cargarDatos() {
     c2.innerText = live.c2 + " °C";
     c12.innerText = live.c12 + " °C";
 
-    pwm.innerText = live.pwm;
+    pwm.innerText = (Number(live.pwm) * 100 / 255).toFixed(1) + " %";
     corriente.innerText = live.corriente + " A";
     rocio.innerText = live.puntorocio + " °C";
 
@@ -705,7 +705,7 @@ async function cargarConfig() {
                         </div>
 
                         <div>
-                            🌬️ Cámara:
+                            🌬️ Flujo de aire en cámara:
                             <span class="font-mono text-yellow-300">
                                 ${
                                     data.velA !== undefined &&
@@ -717,7 +717,7 @@ async function cargarConfig() {
                         </div>
 
                         <div>
-                            🔥 Zona caliente:
+                            🔥 Flujo de aire en disipador de calor:
                             <span class="font-mono text-yellow-300">
                                 ${
                                     data.velB !== undefined &&
