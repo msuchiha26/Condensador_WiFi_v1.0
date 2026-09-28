@@ -1,11 +1,25 @@
+#include <LittleFS.h>
+#include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
 #include <WiFiClientSecure.h>
 #include <SoftwareSerial.h>
+#include <ESP8266mDNS.h>
+#include <DNSServer.h>
 
-const char* ssid = "ElBromas_2.4G";
-const char* password = "90_kakashi_26";
+
+// =========================
+// CONFIGURACIÓN WIFI
+// =========================
+
+// =====================================================
+// CONFIGURACIÓN WIFI CON LITTLEFS
+// =====================================================
+String wifiSSID = "";
+String wifiPassword = "";
+
+bool modoConfiguracionWiFi = false;
 
 const char* serverConfig = "https://cyrrotinqlcnfemozcza.supabase.co/rest/v1/config_actual?id=eq.1&select=*";
 const char* serverData = "https://cyrrotinqlcnfemozcza.supabase.co/rest/v1/live_data?id=eq.1";
@@ -16,7 +30,13 @@ const char* supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // BUFFER SERIAL
 // =========================
 String buffer = "";
-SoftwareSerial arduinoSerial(D5, D6); // RX, TX
+SoftwareSerial arduinoSerial(D5, D6);  // RX, TX
+
+// =========================
+// SERVIDOR WEB CONFIG WIFI
+// =========================
+ESP8266WebServer server(80);
+DNSServer dnsServer;
 
 // =========================
 // CONTROL DE TIEMPO
@@ -44,26 +64,17 @@ bool arduinoReconectado = false;
 // =========================
 // SETUP
 // =========================
+
 void setup() {
-  Serial.begin(9600);
   arduinoSerial.begin(9600);
 
-  WiFi.mode(WIFI_STA);
-
-  WiFi.begin(ssid, password);
-
-  unsigned long startAttempt = millis();
-
-  while (
-    WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000) {
-    delay(500);
+  if (!LittleFS.begin()) {
+    return;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-
-    ESP.restart();
-  }
+  conectarWiFiGuardado();
 }
+
 
 // =========================
 // ENVIAR DATOS A API
@@ -146,14 +157,14 @@ void enviarDatos(String linea) {
     velARX < 0 || velARX > 255 || velBRX < 0 || velBRX > 255 ||
 
     // =========================
-    // CORRIENTE
+    // POTENCIA
     // =========================
-    corrienteRX < 0 || corrienteRX > 30 ||
+    corrienteRX < 0 || corrienteRX > 200 ||
 
     // =========================
     // ESTADO
     // =========================
-    estadoRX < 0 || estadoRX > 4
+    estadoRX < 0 || estadoRX > 2
 
   ) {
     return;
@@ -262,6 +273,387 @@ void enviarDatos(String linea) {
   http.end();
 }
 
+
+// -----------------------------------------------------
+// CARGAR CONFIGURACIÓN WIFI
+// -----------------------------------------------------
+
+bool cargarConfiguracionWiFi() {
+
+  if (!LittleFS.exists("/wifi.txt")) {
+    return false;
+  }
+
+  File archivo = LittleFS.open("/wifi.txt", "r");
+
+  if (!archivo) {
+    return false;
+  }
+
+  wifiSSID = archivo.readStringUntil('\n');
+  wifiPassword = archivo.readStringUntil('\n');
+
+  wifiSSID.trim();
+  wifiPassword.trim();
+
+  archivo.close();
+
+  if (wifiSSID.length() == 0) {
+    return false;
+  }
+  return true;
+}
+
+
+// -----------------------------------------------------
+// GUARDAR CONFIGURACIÓN WIFI
+// -----------------------------------------------------
+
+bool guardarConfiguracionWiFi(String nuevoSSID, String nuevaPassword) {
+
+  File archivo = LittleFS.open("/wifi.txt", "w");
+
+  if (!archivo) {
+    return false;
+  }
+
+  archivo.println(nuevoSSID);
+  archivo.println(nuevaPassword);
+
+  archivo.close();
+
+  wifiSSID = nuevoSSID;
+  wifiPassword = nuevaPassword;
+  return true;
+}
+
+
+// -----------------------------------------------------
+// PÁGINA PRINCIPAL DE CONFIGURACIÓN
+// -----------------------------------------------------
+
+void paginaConfiguracion() {
+
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Configuración WiFi</title>
+
+<style>
+
+body {
+  font-family: Arial, sans-serif;
+  background: #f2f2f2;
+  margin: 0;
+  padding: 20px;
+}
+
+.container {
+  max-width: 450px;
+  margin: 30px auto;
+  background: white;
+  padding: 25px;
+  border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+}
+
+h1 {
+  text-align: center;
+}
+
+p {
+  color: #555;
+}
+
+label {
+  display: block;
+  margin-top: 15px;
+  font-weight: bold;
+}
+
+input {
+  width: 100%;
+  padding: 12px;
+  margin-top: 6px;
+  box-sizing: border-box;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 16px;
+}
+
+button {
+  width: 100%;
+  padding: 12px;
+  margin-top: 20px;
+  border: none;
+  border-radius: 6px;
+  background: #333;
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>Condensador</h1>
+
+<p>Configuración de red WiFi</p>
+
+<form action="/guardar" method="POST">
+
+<label>Nombre de la red WiFi</label>
+
+<input
+  type="text"
+  name="ssid"
+  placeholder="SSID"
+  required>
+
+<label>Contraseña</label>
+
+<div style="display: flex; gap: 8px;">
+
+  <input
+    type="password"
+    id="password"
+    name="password"
+    placeholder="Contraseña"
+    style="flex: 1;"
+    required>
+
+  <button
+    type="button"
+    onclick="mostrarPassword()"
+    style="width: auto; margin-top: 6px;">
+    Mostrar
+  </button>
+
+</div>
+
+<button type="submit">
+  Guardar configuración
+</button>
+
+</form>
+
+</div>
+
+<script>
+
+function mostrarPassword() {
+
+  const campo = document.getElementById("password");
+
+  if (campo.type === "password") {
+
+    campo.type = "text";
+
+  } else {
+
+    campo.type = "password";
+
+  }
+
+}
+
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+
+// -----------------------------------------------------
+// GUARDAR CONFIGURACIÓN DESDE LA PÁGINA
+// -----------------------------------------------------
+
+void guardarDesdeWeb() {
+
+  if (!server.hasArg("ssid") || !server.hasArg("password")) {
+
+    server.send(
+      400,
+      "text/plain",
+      "Faltan datos");
+
+    return;
+  }
+
+  String nuevoSSID = server.arg("ssid");
+  String nuevaPassword = server.arg("password");
+
+  nuevoSSID.trim();
+  nuevaPassword.trim();
+
+  if (nuevoSSID.length() == 0) {
+
+    server.send(
+      400,
+      "text/plain",
+      "SSID vacío");
+
+    return;
+  }
+
+  if (guardarConfiguracionWiFi(
+        nuevoSSID,
+        nuevaPassword)) {
+
+    server.send(
+      200,
+      "text/html",
+      "<html><body><h1>Configuración guardada</h1>"
+      "<p>El ESP8266 se reiniciará y tratará de conectarse a la red.</p>"
+      "</body></html>");
+
+    delay(2000);
+
+    ESP.restart();
+
+  } else {
+
+    server.send(
+      500,
+      "text/plain",
+      "No se pudo guardar la configuración");
+  }
+}
+
+
+// -----------------------------------------------------
+// BORRAR CONFIGURACIÓN WIFI
+// -----------------------------------------------------
+
+void borrarConfiguracionWiFi() {
+
+  if (LittleFS.exists("/wifi.txt")) {
+
+    LittleFS.remove("/wifi.txt");
+    server.send(
+      200,
+      "text/html",
+      "<html><body><h1>Configuración eliminada</h1>"
+      "<p>El ESP8266 se reiniciará.</p>"
+      "</body></html>");
+
+    delay(2000);
+
+    ESP.restart();
+
+  } else {
+
+    server.send(
+      200,
+      "text/plain",
+      "No había configuración guardada");
+  }
+}
+
+
+// -----------------------------------------------------
+// INICIAR SERVIDOR DE CONFIGURACIÓN
+// -----------------------------------------------------
+
+void iniciarServidorConfiguracion() {
+
+  server.on(
+    "/",
+    HTTP_GET,
+    paginaConfiguracion);
+
+  server.on(
+    "/guardar",
+    HTTP_POST,
+    guardarDesdeWeb);
+
+  server.on(
+    "/borrar",
+    HTTP_GET,
+    borrarConfiguracionWiFi);
+
+  server.begin();
+}
+
+
+// -----------------------------------------------------
+// MODO ACCESS POINT
+// -----------------------------------------------------
+
+void iniciarModoConfiguracion() {
+
+  modoConfiguracionWiFi = true;
+
+  WiFi.disconnect(true);
+  delay(500);
+
+  WiFi.mode(WIFI_AP);
+
+  WiFi.softAP("esp");
+
+  IPAddress IP = WiFi.softAPIP();
+
+  // Servidor DNS para el modo de configuración
+  dnsServer.start(53, "*", IP);
+
+  iniciarServidorConfiguracion();
+}
+
+
+// -----------------------------------------------------
+// CONECTAR A WIFI GUARDADO
+// -----------------------------------------------------
+
+bool conectarWiFiGuardado() {
+
+  if (!cargarConfiguracionWiFi()) {
+    iniciarModoConfiguracion();
+    return false;
+  }
+
+  modoConfiguracionWiFi = false;
+
+  WiFi.mode(WIFI_STA);
+
+  WiFi.begin(
+    wifiSSID.c_str(),
+    wifiPassword.c_str());
+
+  unsigned long inicio = millis();
+
+  while (
+    WiFi.status() != WL_CONNECTED && millis() - inicio < 20000) {
+
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    iniciarServidorConfiguracion();
+
+    MDNS.begin("esp");
+    MDNS.addService("http", "tcp", 80);
+
+    return true;
+  }
+
+  iniciarModoConfiguracion();
+
+  return false;
+}
+
+
 // =========================
 // LOOP
 // =========================
@@ -290,7 +682,10 @@ void loop() {
         estado_prev = estado_actual;
       } else {
 
-        enviarDatos(buffer);
+        if (WiFi.status() == WL_CONNECTED) {
+          enviarDatos(buffer);
+        }
+
         arduinoReconectado = true;
       }
 
@@ -302,6 +697,12 @@ void loop() {
         buffer = "";
       }
     }
+  }
+
+
+  // Actualizar el servicio mDNS mientras hay conexión WiFi
+  if (WiFi.status() == WL_CONNECTED) {
+    MDNS.update();
   }
 
   // =========================
@@ -316,26 +717,68 @@ void loop() {
   }
 
   // =========================
+  // SERVIDOR WEB / CONFIG WIFI
+  // =========================
+
+  server.handleClient();
+
+  if (modoConfiguracionWiFi) {
+
+
+    dnsServer.processNextRequest();
+    // Mientras está en modo configuración
+    // no intentamos consultar Supabase.
+    return;
+  }
+
+
+  // =========================
   // RECONEXIÓN WIFI
   // =========================
+
   static unsigned long ultimoIntentoWiFi = 0;
+  static unsigned long inicioDesconexion = 0;
 
   if (WiFi.status() != WL_CONNECTED) {
+
+    if (inicioDesconexion == 0) {
+
+      inicioDesconexion = millis();
+    }
+
+
+    // Intentar reconectar cada 10 segundos
 
     if (millis() - ultimoIntentoWiFi > 10000) {
 
       ultimoIntentoWiFi = millis();
+      WiFi.disconnect();
 
-      WiFi.disconnect(true);
-
-      delay(1000);
+      delay(500);
 
       WiFi.mode(WIFI_STA);
 
-      WiFi.begin(ssid, password);
+      WiFi.begin(
+        wifiSSID.c_str(),
+        wifiPassword.c_str());
+    }
+
+
+    // Si lleva 30 segundos sin conexión,
+    // entrar en modo configuración.
+
+    if (millis() - inicioDesconexion > 30000) {
+      iniciarModoConfiguracion();
     }
 
     return;
+  }
+
+  // WiFi recuperado
+
+  if (inicioDesconexion != 0) {
+
+    inicioDesconexion = 0;
   }
 
   // =========================
