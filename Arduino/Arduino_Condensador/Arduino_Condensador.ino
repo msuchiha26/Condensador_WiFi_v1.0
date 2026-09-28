@@ -1,68 +1,102 @@
 #include <Wire.h>
-#include <SPI.h>
-#include <math.h>
 #include <DHT.h>
-#include <DHT_U.h>
-#include "Adafruit_MAX31855.h"
-#include <SoftwareSerial.h>
+#include <INA226_WE.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
-SoftwareSerial espSerial(2, 3);  // RX, TX
+int AltDHT22 = 0;
+
+#define espSerial Serial1  // RX, TX
+
+// ================== INA226 ==================
+#define INA226_ADDRESS 0x40
+
+INA226_WE ina226(INA226_ADDRESS);
+
+// ================== DHT22 ==================
+
+#define DHT_EXT_PIN 26
+#define DHT_INT_PIN 27
+#define DHT_TYPE DHT22
+
+DHT dhtExt(DHT_EXT_PIN, DHT_TYPE);
+DHT dhtInt(DHT_INT_PIN, DHT_TYPE);
+
+
+// ================== DS18B20 ==================
+
+#define ONE_WIRE_BUS 28
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature ds18b20(&oneWire);
+
+
+// ================== DIRECCIONES DS18B20 ==================
+
+// SensorTemperatura01 -> c1
+DeviceAddress sensorC1 = {
+  0x28, 0xD4, 0xF8, 0xE6,
+  0x54, 0x25, 0x0B, 0x25
+};
+
+// SensorTemperatura02 -> c2
+DeviceAddress sensorC2 = {
+  0x28, 0xA7, 0x8F, 0x10,
+  0x54, 0x25, 0x0B, 0xA0
+};
+
+// =====================================================
+// ACTUADORES
+// =====================================================
+
+// BTS7960 - 2 Peltier
+#define PELTIER_RPWM 6
+#define PELTIER_LPWM 7
+
+// L298N - ventiladores
+// Canal A -> cámara interna
+#define FAN_A_PWM 44
+#define FAN_A_LOW 45
+
+// Canal B -> disipación de calor
+#define FAN_B_LOW 46
+#define FAN_B_PWM 47
+
 // 🔥 buffer de recepción
 String buffer = "";
 
 // ================== CONFIG ==================
 #define BAUD 9600
 
-float factor_tiempo = 1;
+const unsigned long INTERVALO_SENSOR = 2000;
+const unsigned long INTERVALO_CONTROL = 5000;
 
 // ---------- TIEMPO ----------
-float dt_real = 1;
-float dt;
 
-bool ledActivo = false;
-unsigned long ledTimer = 0;
-
-bool cfgRecibido = false;
-
-float serialSimulado = 15;  //Periodo de muestreo para base de datos
+float intervaloDatos = 15;  //Periodo de muestreo para base de datos
 
 unsigned long intervaloSensor;
 unsigned long intervaloControl;
 unsigned long intervaloSerial;
 
-float calcular_dt_real(float factor) {
+// ---------- VAriables iniciales ----------
+float c12 = 0;
+float c1 = 0;
+float c2 = 0;
 
-  if (factor <= 1) return 1.0;     //24h
-  if (factor <= 2) return 0.5;     //12h
-  if (factor <= 4) return 0.25;    //6h
-  if (factor <= 8) return 0.125;   //3h
-  if (factor <= 48) return 0.1;    //30 min
-  if (factor <= 120) return 0.05;  //12 min
-  if (factor <= 300) return 0.02;  //4.8 min
+float I = 0;  // Potencia consumida [W]
 
-  return 0.01;  //1 min
-}
+float puntoRocio = 0;
+float error = 0;
 
-// ---------- PARÁMETROS ----------
-float tau_int = 80.0;
-float tau_c12 = 120.0;
-float tau_delta = 95.0;
+float pwm = 0;
 
-// HUMEDAD
-float tau_up = 300.0;
-float tau_down = 40.0;
 
-// ---------- ESTADOS ----------
-float c12;
-float c1 = 0, c2 = 0;
-float delta_int_c12_real;
-float I = 0;
-float puntoRocio = 0, error = 0, pwm = 0, pwmAnterior = 0;
+float hInt = 0;
+float tInt = 0;
 
-float hInt = 73.3;  // condición inicial experimental
-float tInt;
-float hExt;
-float tExt;
+float hExt = 0;
+float tExt = 0;
 
 bool okInt = true, okExt = true;
 
@@ -80,11 +114,9 @@ int pwmManual = 0;
 int Vel_PWM_A = 0, Vel_PWM_B = 0;
 
 int estadoSistema = 0;
-// 0 = OK
-// 1 = Sobrecorriente
-// 2 = Sobretemperatura
-// 3 = Error sensores
-// 4 = Humedad baja
+// 0 = Operación normal
+// 1 = Falla de sensores
+// 2 = Humedad objetivo alcanzada
 int estadoControl = 0;  // 0 reposo, 1 ejecución
 
 float humedadObjetivo = 0;
@@ -123,123 +155,360 @@ float rocProm = 0;
 float errorProm = 0;
 
 
-// ---------- VENTILADOR ----------
-float ventilador_real(int pwm) {
-  int pwm_dead = 48;
-  if (pwm <= pwm_dead) return 0.0;
-  return pow((pwm - pwm_dead) / float(255 - pwm_dead), 0.6);
-}
-
-
 // =========================
 // FUNCIONES AUXILIARES
 // =========================
+
+//---------------- Calcular PuntoRocio --------------------------
+
 float calcularPuntoRocio(float tempC, float humRel) {
   float a = 17.62, b = 243.12;
   float gamma = log(humRel / 100.0) + (a * tempC) / (b + tempC);
   return ((b * gamma) / (a - gamma));
 }
 
-float leerCorrienteFiltrada() {
-  return pwm * 0.03;
-}
+//-------------------- Leer Potencia del Sistema ---------------------------
 
-unsigned long calcularTSensor(float factor) {
+float leerPotenciaINA226() {
 
-  unsigned long t = 1000 / factor;
+  float voltaje = ina226.getBusVoltage_V();
+  float corriente = ina226.getCurrent_mA() / 1000.0;
 
-  if (t < 50) t = 50;
-
-  return t;
-}
-
-unsigned long calcularTControl(float factor) {
-
-  unsigned long t = 5000 / factor;
-
-  if (t < 100) t = 100;
-
-  return t;
-}
-
-unsigned long calcularTSerial(float factor) {
-
-  // serialSimulado está en segundos simulados
-  unsigned long t = (serialSimulado * 1000.0) / factor;
-
-  if (t < 500) t = 500;
-
-  return t;
-}
-
-// ---------- tExt ----------
-float tExt_simulada() {
-
-  float t_min = 27.4;
-  float t_max = 30.8;
-
-  float media = (t_max + t_min) / 2.0;
-  float amp = (t_max - t_min) / 2.0;
-
-  float periodo = 86400.0;
-  float omega = 2 * PI / periodo;
-
-  float tiempo = (millis() / 1000.0) * factor_tiempo;
-
-  float ruido = random(-10, 10) / 1000.0;
-
-  return media + amp * sin(omega * tiempo - PI / 2) + ruido;
-}
-
-// =========================
-// SETUP
-// =========================
-void setup() {
-  Serial.begin(BAUD);
-  espSerial.begin(BAUD);
-  //Serial.println("=== Arduino listo ===");
-  randomSeed(analogRead(0));
-
-  dt_real = calcular_dt_real(factor_tiempo);
-  dt = dt_real * factor_tiempo;
-
-  float factor_pwm = 0.0;
-
-  float delta_base = 5.9 + (21.25 - 5.9) * factor_pwm;
-  float delta_target = 3.9 + (16.55 - 3.9) * factor_pwm;
-
-  tExt = tExt_simulada();
-
-  intervaloSensor = calcularTSensor(factor_tiempo);
-  intervaloControl = calcularTControl(factor_tiempo);
-  intervaloSerial = calcularTSerial(factor_tiempo);
-
-  // temperatura inicial
-  c12 = tExt - delta_base;
-  delta_int_c12_real = delta_target;
-  tInt = c12 + delta_int_c12_real;
-
-  pinMode(13, OUTPUT);
-  digitalWrite(13, LOW);
-
-  tiempoAnterior = millis();
-}
-
-// =========================
-// LOOP
-// =========================
-void loop() {
-
-  unsigned long TA = millis();
-  // =========================
-  // APAGAR LED
-  // =========================
-  if (ledActivo && millis() - ledTimer > 200) {
-
-    digitalWrite(13, LOW);
-    ledActivo = false;
+  // Protección contra valores inválidos
+  if (isnan(voltaje) || isnan(corriente)) {
+    return 0.0;
   }
 
+  // Potencia = Voltaje × Corriente
+  return voltaje * corriente;
+}
+
+//-----------------Actualizar Variables-------------------------
+
+// =========================
+// ACTUALIZAR VARIABLES REALES
+// =========================
+
+void actualizarVariables() {
+
+// =====================================================
+// DHT22
+// Un sensor por ciclo
+// Si falla, se reintenta inmediatamente hasta 3 veces
+// =====================================================
+
+if (AltDHT22 == 0) {
+
+  bool lecturaOK = false;
+
+  for (int intento = 1; intento <= 3; intento++) {
+
+    float nueva_tExt = dhtExt.readTemperature();
+    float nueva_hExt = dhtExt.readHumidity();
+
+    if (!isnan(nueva_tExt) && !isnan(nueva_hExt)) {
+
+      tExt = nueva_tExt;
+      hExt = nueva_hExt;
+      okExt = true;
+
+      lecturaOK = true;
+
+      Serial.print("DHT22 EXTERIOR OK - intento ");
+      Serial.println(intento);
+
+      break;
+    }
+
+    // Si falló, intentar inmediatamente otra vez
+    if (intento < 3) {
+      Serial.print("DHT22 EXTERIOR fallo - reintento ");
+      Serial.println(intento + 1);
+    }
+  }
+
+  if (lecturaOK) {
+    AltDHT22 = 1;
+  } else {
+    okExt = false;
+    Serial.println("ERROR: DHT22 EXTERIOR - 3 intentos fallidos");
+  }
+
+} else {
+
+  bool lecturaOK = false;
+
+  for (int intento = 1; intento <= 10; intento++) {
+
+    float nueva_tInt = dhtInt.readTemperature();
+    float nueva_hInt = dhtInt.readHumidity();
+
+    if (!isnan(nueva_tInt) && !isnan(nueva_hInt)) {
+
+      tInt = nueva_tInt;
+      hInt = nueva_hInt;
+      okInt = true;
+
+      lecturaOK = true;
+
+      Serial.print("DHT22 INTERIOR OK - intento ");
+      Serial.println(intento);
+
+      break;
+    }
+
+    if (intento < 3) {
+      Serial.print("DHT22 INTERIOR fallo - reintento ");
+      Serial.println(intento + 1);
+    }
+  }
+
+  if (lecturaOK) {
+    AltDHT22 = 0;
+  } else {
+    okInt = false;
+    Serial.println("ERROR: DHT22 INTERIOR - 3 intentos fallidos");
+  }
+}
+
+
+  // =====================================================
+  // DS18B20
+  // =====================================================
+
+  ds18b20.requestTemperatures();
+
+  float nueva_c1 = ds18b20.getTempC(sensorC1);
+  float nueva_c2 = ds18b20.getTempC(sensorC2);
+
+  if (nueva_c1 != DEVICE_DISCONNECTED_C &&
+      nueva_c2 != DEVICE_DISCONNECTED_C &&
+      !isnan(nueva_c1) &&
+      !isnan(nueva_c2)) {
+
+    c1 = nueva_c1;
+    c2 = nueva_c2;
+
+    c12 = (c1 + c2) / 2.0;
+
+  } else {
+
+    c1 = NAN;
+    c2 = NAN;
+    c12 = NAN;
+  }
+
+
+  // =====================================================
+  // INA226
+  // =====================================================
+
+  I = leerPotenciaINA226();
+
+
+  // =====================================================
+  // PUNTO DE ROCÍO
+  // =====================================================
+  
+  // Solo se calcula cuando tenemos una lectura exterior válida
+  if (okExt) {
+
+    puntoRocio = calcularPuntoRocio(tExt, hExt);
+
+  } else {
+
+    puntoRocio = NAN;
+  }
+}
+
+
+
+//------------------Actualizar Estados----------------------
+
+void actualizarEstadoSistema() {
+
+  // 0 = Operación normal
+  // 1 = Falla de sensores
+  // 2 = Humedad objetivo alcanzada
+
+  if (isnan(c1) || isnan(c2) || !okInt || !okExt) {
+
+    estadoSistema = 1;
+  } else {
+
+    estadoSistema = 0;
+  }
+
+  if (estadoSistema == 0 && estadoControl == 1 && !isnan(hExt)) {
+
+    if (hExt < humedadObjetivo) {
+
+      pausaHumedad = true;
+    } else if (hExt > humedadObjetivo) {
+
+      pausaHumedad = false;
+    }
+
+    if (pausaHumedad) {
+
+      estadoSistema = 2;
+    }
+  }
+}
+
+//---------------Acumular promedios-------------------------
+
+void acumularPromedios() {
+
+  sumaCorriente += I;
+
+  pwm = constrain(pwm, 0, 255);
+
+  sumaPWM += pwm;
+
+  suma_tExt += tExt;
+  suma_tInt += tInt;
+  suma_hExt += hExt;
+  suma_hInt += hInt;
+  suma_c12 += c12;
+  suma_c1 += c1;
+  suma_c2 += c2;
+  sumaRocio += puntoRocio;
+
+  if (estadoControl == 1 && !modoManual) {
+
+    sumaError += error;
+  }
+
+  contadorMuestras++;
+}
+
+//-----------------Deshabilitar Actuadores--------------------
+
+void deshabilitarActuadores() {
+
+  // =========================
+  // PELTIER
+  // =========================
+
+  analogWrite(PELTIER_RPWM, 0);
+  analogWrite(PELTIER_LPWM, 0);
+
+  // =========================
+  // VENTILADORES - CÁMARA
+  // =========================
+
+  analogWrite(FAN_A_PWM, 0);
+  digitalWrite(FAN_A_LOW, LOW);
+
+  // =========================
+  // VENTILADORES - DISIPACIÓN
+  // =========================
+
+  analogWrite(FAN_B_PWM, 0);
+  digitalWrite(FAN_B_LOW, LOW);
+
+  // =========================
+  // IMPORTANTE
+  // =========================
+  // NO modificar aquí:
+  //
+  // pwmManual
+  // Vel_PWM_A
+  // Vel_PWM_B
+  //
+  // Estos valores corresponden a la
+  // configuración recibida desde ESP8266.
+
+  pwm = 0;
+
+  errorAcumulado = 0;
+}
+
+// =====================================================
+// APLICAR ACTUADORES
+// =====================================================
+
+void aplicarActuadores() {
+
+  // =========================
+  // LIMITAR VALORES
+  // =========================
+
+  pwm = constrain(pwm, 0, 255);
+
+  Vel_PWM_A = constrain(Vel_PWM_A, 0, 255);
+  Vel_PWM_B = constrain(Vel_PWM_B, 0, 255);
+
+
+  // =========================
+  // PELTIER
+  // =========================
+
+  // Las dos Peltier trabajan juntas
+  // RPWM recibe el PWM
+  // LPWM permanece en LOW
+
+  analogWrite(PELTIER_RPWM, (int)pwm);
+  analogWrite(PELTIER_LPWM, 0);
+
+
+  // =========================
+  // VENTILADORES - CÁMARA
+  // =========================
+
+  // IN1 = PWM
+  // IN2 = LOW
+
+  analogWrite(FAN_A_PWM, Vel_PWM_A);
+  digitalWrite(FAN_A_LOW, LOW);
+
+
+  // =========================
+  // VENTILADORES - DISIPACIÓN
+  // =========================
+
+  // IN3 = LOW
+  // IN4 = PWM
+
+  digitalWrite(FAN_B_LOW, LOW);
+  analogWrite(FAN_B_PWM, Vel_PWM_B);
+}
+
+//-----------------Control Auto------------------------------
+void ejecutarControlAutomatico() {
+
+  error = puntoRocio - c12;
+
+  float dt_control = ((millis() - tiempoAnterior) / 1000.0);
+
+  tiempoAnterior = millis();
+
+  if (pwm > 0 && pwm < 255) {
+    errorAcumulado += error * dt_control;
+  }
+
+  errorAcumulado = constrain(errorAcumulado, -maxIntegracion, maxIntegracion);
+
+  float salidaPI = kp * error + ki * errorAcumulado;
+
+  float tempObjetivo = salidaPI + c12;
+
+  pwm = (tempObjetivo - 28.0) / -0.0745;
+
+  pwm = constrain(pwm, 0, 255);
+}
+
+//-----------------Control Manual-----------------------------
+
+void ejecutarControlManual() {
+
+  pwm = constrain(pwmManual, 0, 255);
+}
+
+//----------------Recibir Configuracion----------------------
+
+void recibirConfiguracion() {
   // =========================
   // RECEPCIÓN SERIAL NO BLOQUEANTE
   // =========================
@@ -256,6 +525,12 @@ void loop() {
         //Serial.println(buffer);
 
         String datos = buffer.substring(4);
+
+        Serial.println();
+        Serial.println("========== CONFIGURACION RECIBIDA ==========");
+        Serial.println("Trama completa:");
+        Serial.println(buffer);
+        Serial.println();
 
         int idx[8];
         int start = 0;
@@ -320,7 +595,7 @@ void loop() {
                                  idx[6])
                             .toFloat();
 
-        serialSimulado = datos.substring(
+        intervaloDatos = datos.substring(
                                 idx[6] + 1,
                                 idx[7])
                            .toFloat();
@@ -329,29 +604,42 @@ void loop() {
                                idx[7] + 1)
                           .toInt();
 
-        if (estadoControl == 0) {
 
-          pwm = 0;
-          pwmManual = 0;
+        Serial.println("Valores recibidos:");
 
-          Vel_PWM_A = 0;
-          Vel_PWM_B = 0;
+        Serial.print("modoManual       = ");
+        Serial.println(modoManual);
 
-          errorAcumulado = 0;
+        Serial.print("pwmManual        = ");
+        Serial.println(pwmManual);
 
-          pausaHumedad = false;
-          humedadObjetivo = 0;
-        }
+        Serial.print("kp               = ");
+        Serial.println(kp, 2);
 
-        cfgRecibido = true;
-        digitalWrite(13, HIGH);
+        Serial.print("ki               = ");
+        Serial.println(ki, 2);
+
+        Serial.print("Vel_PWM_A / velA = ");
+        Serial.println(Vel_PWM_A);
+
+        Serial.print("Vel_PWM_B / velB = ");
+        Serial.println(Vel_PWM_B);
+
+        Serial.print("humedadObjetivo  = ");
+        Serial.println(humedadObjetivo, 2);
+
+        Serial.print("intervaloDatos   = ");
+        Serial.println(intervaloDatos, 2);
+
+        Serial.print("estadoControl    = ");
+        Serial.println(estadoControl);
+
+        Serial.println("============================================");
+
         espSerial.println("ACK");
 
 
-        ledActivo = true;
-        ledTimer = millis();
-
-        intervaloSerial = calcularTSerial(factor_tiempo);
+        intervaloSerial = calcularTSerial();
 
         errorAcumulado = 0;
       }
@@ -365,305 +653,513 @@ void loop() {
       if (buffer.length() > 80) buffer = "";
     }
   }
+}
+
+//-----------------Enviar Datos-------------------------------
+
+void enviarDatos() {
+  // =========================
+  // ENVÍO SERIAL (ESCALADO x100 SIN VARIABLES EXTRA)
+  // =========================
+
+  // =========================
+  // CALCULAR PROMEDIOS
+  // =========================
+  if (contadorMuestras > 0) {
+
+    corrienteProm = sumaCorriente / contadorMuestras;
+    pwmProm = sumaPWM / contadorMuestras;
+
+    tExtProm = suma_tExt / contadorMuestras;
+    tIntProm = suma_tInt / contadorMuestras;
+    hExtProm = suma_hExt / contadorMuestras;
+    hIntProm = suma_hInt / contadorMuestras;
+    c12Prom = suma_c12 / contadorMuestras;
+    c1Prom = suma_c1 / contadorMuestras;
+    c2Prom = suma_c2 / contadorMuestras;
+    rocProm = sumaRocio / contadorMuestras;
+    errorProm = sumaError / contadorMuestras;
+  }
+
+
+  // =========================
+  // DEBUG: DATOS QUE VAN A ESP
+  // =========================
+
+  Serial.println();
+  Serial.println("========== DATOS A ESP8266 ==========");
+
+  Serial.print("tExt = ");
+  Serial.println(tExtProm, 2);
+
+  Serial.print("hExt = ");
+  Serial.println(hExtProm, 2);
+
+  Serial.print("tInt = ");
+  Serial.println(tIntProm, 2);
+
+  Serial.print("hInt = ");
+  Serial.println(hIntProm, 2);
+
+  Serial.print("c1 = ");
+  Serial.println(c1Prom, 2);
+
+  Serial.print("c2 = ");
+  Serial.println(c2Prom, 2);
+
+  Serial.print("c12 = ");
+  Serial.println(c12Prom, 2);
+
+  Serial.print("PuntoRocio = ");
+  Serial.println(rocProm, 2);
+
+  Serial.print("Error = ");
+  Serial.println(errorProm, 2);
+
+  Serial.print("PWM = ");
+  Serial.println(pwmProm, 0);
+
+  Serial.print("VelA = ");
+  Serial.println(Vel_PWM_A);
+
+  Serial.print("VelB = ");
+  Serial.println(Vel_PWM_B);
+
+  Serial.print("Potencia = ");
+  Serial.println(corrienteProm, 3);
+
+  Serial.print("Estado = ");
+  Serial.println(estadoSistema);
+
+  Serial.println("====================================");
+
+
+  // =========================
+  // ENVÍO REAL A ESP8266
+  // =========================
+
+  espSerial.print((long)(tExtProm * 100));
+  espSerial.print(",");
+  espSerial.print((long)(hExtProm * 100));
+  espSerial.print(",");
+  espSerial.print((long)(tIntProm * 100));
+  espSerial.print(",");
+  espSerial.print((long)(hIntProm * 100));
+  espSerial.print(",");
+  espSerial.print((long)(c1Prom * 100));
+  espSerial.print(",");
+  espSerial.print((long)(c2Prom * 100));
+  espSerial.print(",");
+  espSerial.print((long)(c12Prom * 100));
+  espSerial.print(",");
+  espSerial.print((long)(rocProm * 100));
+  espSerial.print(",");
+  espSerial.print((long)(errorProm * 100));
+  espSerial.print(",");
+  espSerial.print((int)(pwmProm));
+  espSerial.print(",");
+  espSerial.print(Vel_PWM_A);
+  espSerial.print(",");
+  espSerial.print(Vel_PWM_B);
+  espSerial.print(",");
+  espSerial.print((long)(corrienteProm * 100));
+  espSerial.print(",");
+  espSerial.println(estadoSistema);
+
+  // =========================
+  // RESET PROMEDIOS
+  // =========================
+  sumaCorriente = 0;
+  sumaPWM = 0;
+
+  suma_tExt = 0;
+  suma_tInt = 0;
+  suma_hExt = 0;
+  suma_hInt = 0;
+  suma_c12 = 0;
+  suma_c1 = 0;
+  suma_c2 = 0;
+  sumaRocio = 0;
+  sumaError = 0;
+
+  contadorMuestras = 0;
+}
+
+//-----------------Ejecutar Control--------------------------
+
+void ejecutarControl() {
+
+  Serial.println();
+  Serial.println("========== EJECUTANDO CONTROL ==========");
+
+  Serial.print("estadoControl = ");
+  Serial.println(estadoControl);
+
+  Serial.print("estadoSistema = ");
+  Serial.println(estadoSistema);
+
+  Serial.print("modoManual = ");
+  Serial.println(modoManual);
+
+  Serial.print("pwmManual = ");
+  Serial.println(pwmManual);
+
+  Serial.print("Vel_PWM_A = ");
+  Serial.println(Vel_PWM_A);
+
+  Serial.print("Vel_PWM_B = ");
+  Serial.println(Vel_PWM_B);
+
+  // =========================
+  // REPOSO
+  // =========================
+
+  if (estadoControl == 0) {
+
+    Serial.println(">>> REPOSO");
+
+    deshabilitarActuadores();
+
+    pausaHumedad = false;
+    humedadObjetivo = 0;
+
+    pwmProm = 0;
+    corrienteProm = 0;
+
+    sumaPWM = 0;
+    sumaCorriente = 0;
+  }
+
+  // =========================
+  // ESTADOS QUE DETIENEN
+  // =========================
+
+  else if (estadoSistema == 1 || estadoSistema == 2) {
+
+    Serial.println(">>> SISTEMA DETENIDO POR ESTADO");
+
+    deshabilitarActuadores();
+  }
+
+  // =========================
+  // EJECUCIÓN NORMAL
+  // =========================
+
+  else {
+
+    Serial.println(">>> EJECUCION NORMAL");
+
+    if (!modoManual) {
+
+      Serial.println(">>> CONTROL AUTOMATICO");
+
+      ejecutarControlAutomatico();
+
+    } else {
+
+      Serial.println(">>> CONTROL MANUAL");
+
+      ejecutarControlManual();
+    }
+
+    aplicarActuadores();
+
+    Serial.print("PWM aplicado = ");
+    Serial.println(pwm);
+
+    Serial.print("VelA aplicado = ");
+    Serial.println(Vel_PWM_A);
+
+    Serial.print("VelB aplicado = ");
+    Serial.println(Vel_PWM_B);
+  }
+
+  Serial.println(">>> SALIDAS FISICAS <<<");
+
+  Serial.print("D8 PELTIER_RPWM = ");
+  Serial.println(analogRead(PELTIER_RPWM));
+
+  Serial.print("D44 FAN_A_PWM = ");
+  Serial.println(analogRead(FAN_A_PWM));
+
+  Serial.print("D46 FAN_B_PWM = ");
+  Serial.println(analogRead(FAN_B_PWM));
+
+  Serial.println("========================================");
+}
+//-----------------Tiempos para la ejecucion-------------------
+
+unsigned long calcularTSerial() {
+
+  unsigned long t = intervaloDatos * 1000UL;
+
+  return t;
+}
+
+
+
+// =====================================================
+// MOSTRAR SENSORES EN SERIAL DEL PC
+// =====================================================
+
+void mostrarSensoresSerial() {
+
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("         LECTURA DE SENSORES");
+  Serial.println("======================================");
+
+  // DHT22 EXTERIOR
+  Serial.println("DHT22 EXTERIOR:");
+
+  if (okExt) {
+    Serial.print("  Temperatura: ");
+    Serial.print(tExt, 2);
+    Serial.println(" °C");
+
+    Serial.print("  Humedad:     ");
+    Serial.print(hExt, 2);
+    Serial.println(" %");
+  } else {
+    Serial.println("  ERROR DE LECTURA");
+  }
+
+
+  // DHT22 INTERIOR
+  Serial.println();
+  Serial.println("DHT22 INTERIOR:");
+
+  if (okInt) {
+    Serial.print("  Temperatura: ");
+    Serial.print(tInt, 2);
+    Serial.println(" °C");
+
+    Serial.print("  Humedad:     ");
+    Serial.print(hInt, 2);
+    Serial.println(" %");
+  } else {
+    Serial.println("  ERROR DE LECTURA");
+  }
+
+
+  // DS18B20
+  Serial.println();
+  Serial.println("DS18B20:");
+
+  if (!isnan(c1)) {
+    Serial.print("  Sensor C1: ");
+    Serial.print(c1, 2);
+    Serial.println(" °C");
+  } else {
+    Serial.println("  Sensor C1: ERROR");
+  }
+
+  if (!isnan(c2)) {
+    Serial.print("  Sensor C2: ");
+    Serial.print(c2, 2);
+    Serial.println(" °C");
+  } else {
+    Serial.println("  Sensor C2: ERROR");
+  }
+
+  if (!isnan(c12)) {
+    Serial.print("  Promedio C1/C2: ");
+    Serial.print(c12, 2);
+    Serial.println(" °C");
+  }
+
+
+  // PUNTO DE ROCÍO
+  Serial.println();
+  Serial.println("PUNTO DE ROCÍO:");
+
+  if (!isnan(puntoRocio)) {
+    Serial.print("  ");
+    Serial.print(puntoRocio, 2);
+    Serial.println(" °C");
+  } else {
+    Serial.println("  ERROR");
+  }
+
+
+  // INA226
+  Serial.println();
+  Serial.println("INA226:");
+
+  Serial.print("  Potencia: ");
+  Serial.print(I, 3);
+  Serial.println(" W");
+
+
+  // ESTADO
+  Serial.println();
+  Serial.print("Estado sistema: ");
+  Serial.println(estadoSistema);
+
+  Serial.println("======================================");
+}
+
+
+
+
+
+// =========================
+// SETUP
+// =========================
+void setup() {
+
+  // =====================================================
+  // CONFIGURAR PINES DE ACTUADORES
+  // =====================================================
+
+  // BTS7960
+  pinMode(PELTIER_RPWM, OUTPUT);
+  pinMode(PELTIER_LPWM, OUTPUT);
+
+  // L298N
+  pinMode(FAN_A_PWM, OUTPUT);
+  pinMode(FAN_A_LOW, OUTPUT);
+
+  pinMode(FAN_B_LOW, OUTPUT);
+  pinMode(FAN_B_PWM, OUTPUT);
+
+
+  // Inicialmente todo apagado
+  analogWrite(PELTIER_RPWM, 0);
+  analogWrite(PELTIER_LPWM, 0);
+
+  analogWrite(FAN_A_PWM, 0);
+  digitalWrite(FAN_A_LOW, LOW);
+
+  digitalWrite(FAN_B_LOW, LOW);
+  analogWrite(FAN_B_PWM, 0);
+
+
+  Serial.begin(BAUD);
+  espSerial.begin(BAUD);
+
+  // =========================
+  // INICIALIZAR I2C
+  // =========================
+
+  Wire.begin();
+
+  // Velocidad I2C estándar
+  Wire.setClock(100000);
+
+  // Evita que una falla del bus I2C deje bloqueado
+  // indefinidamente al Arduino.
+  Wire.setWireTimeout(25000, true);
+
+  // =========================
+  // INICIALIZAR DHT22
+  // =========================
+
+  dhtExt.begin();
+  dhtInt.begin();
+
+  Serial.println("DHT22 inicializados");
+
+
+  // =========================
+  // INICIALIZAR DS18B20
+  // =========================
+
+  ds18b20.begin();
+
+  if (ds18b20.isConnected(sensorC1)) {
+    Serial.println("SensorTemperatura01 detectado");
+  } else {
+    Serial.println("ERROR: SensorTemperatura01 NO detectado");
+  }
+
+  if (ds18b20.isConnected(sensorC2)) {
+    Serial.println("SensorTemperatura02 detectado");
+  } else {
+    Serial.println("ERROR: SensorTemperatura02 NO detectado");
+  }
+
+  // =========================
+  // INICIALIZAR INA226
+  // =========================
+
+  if (!ina226.init()) {
+
+    Serial.println("ERROR: No se encontro el INA226");
+
+    while (1) {
+      // Si el INA226 no existe, detenemos el Mega.
+    }
+  }
+
+  // CJMCU-226
+  // Shunt R010 = 0.01 ohm
+  // Rango configurado hasta 10 A
+
+  ina226.setResistorRange(0.01, 10.0);
+
+  Serial.println("INA226 detectado correctamente");
+
+  // =========================
+  // RESTO DEL SETUP
+  // =========================
+
+  intervaloSensor = INTERVALO_SENSOR;
+  intervaloControl = INTERVALO_CONTROL;
+  intervaloSerial = calcularTSerial();
+
+  deshabilitarActuadores();
+
+  tiempoAnterior = millis();
+}
+
+// =========================
+// LOOP
+// =========================
+void loop() {
+
+  unsigned long TA = millis();
+  // =========================
+  // RECEPCIÓN SERIAL
+  // =========================
+
+  recibirConfiguracion();
 
   // =========================
   // LECTURA SENSORES
   // =========================
   if (TA - TSensor >= intervaloSensor) {
+
     TSensor = TA;
 
-    tExt = tExt_simulada();
+    actualizarVariables();
 
-    // 🔥 SOLO UNA VEZ (evita error)
-    float factor_pwm = pwm / 255.0;
-    float factor_vent = ventilador_real(Vel_PWM_A);
+    actualizarEstadoSistema();
 
-    float delta_base = 5.9 + (21.25 - 5.9) * factor_pwm;
-    float delta_target = 3.9 + (16.55 - 3.9) * factor_pwm;
+    mostrarSensoresSerial();
 
-    // ---------- c12 ----------
-    float c12_base = tExt - delta_base;
-    float incremento = 1.5 * factor_vent;
-    float c12_obj = c12_base + incremento;
 
-    c12 += (c12_obj - c12) * (dt / tau_c12);
-
-    float ruido1 = random(-10, 10) / 100.0;
-    float ruido2 = random(-10, 10) / 100.0;
-
-    c1 = c12 + ruido1;
-    c2 = c12 + ruido2;
-
-    // ---------- tInt ----------
-    delta_int_c12_real += (delta_target - delta_int_c12_real) * (dt / tau_delta);
-
-    float mix_air = 0.6 * factor_vent;
-    float t_base = c12 + delta_int_c12_real;
-    float t_obj = (1 - mix_air) * t_base + mix_air * tExt;
-
-    tInt += (t_obj - tInt) * (dt / tau_int);
-
-    if (tInt > tExt) tInt = tExt;
-    if (tInt < c12) tInt = c12;
-
-    // ================= HUMEDAD (MODELO EXPERIMENTAL) =================
-
-    float media = (27.4 + 30.8) / 2.0;
-    float omega = 2 * PI / 86400.0;
-    float tiempo = (millis() / 1000.0) * factor_tiempo;
-
-    float fase_h = 2.7;
-
-    // hExt con amplitud ≈ 18
-    hExt = 56.8 + 9.0 * sin(omega * tiempo + fase_h);
-
-    // ---------- OFFSET ----------
-    float offset_base = 16.5;
-    float offset_pwm = offset_base - 3.0 * factor_pwm;
-
-    // 🔥 mezcla realista
-    float mix = 0.7 * factor_vent;
-
-    // 🔥 offset mínimo (clave)
-    float offset_min = 5.0;
-
-    // 🔥 offset final
-    float offset = (1 - mix) * offset_pwm + mix * offset_min;
-
-    float h_obj = hExt + offset;
-
-    // ---------- DINÁMICA ----------
-    float tau;
-
-    if (h_obj < hInt) {
-      tau = tau_down;
-    } else {
-      tau = tau_up;
+    if (estadoSistema == 0) {
+      acumularPromedios();
     }
-
-    hInt += (h_obj - hInt) * (dt / tau);
-
-    // límites
-    if (hInt < 0) hInt = 0;
-    if (hInt > 100) hInt = 100;
-
-    puntoRocio = calcularPuntoRocio(tExt, hExt);
-    I = leerCorrienteFiltrada();  // Corriente de las dos celdas Peltier
-
-    if (isnan(c1) || isnan(c2) || !okInt || !okExt) estadoSistema = 3;
-    else if (c12 > 80.0) estadoSistema = 2;
-    else if (I > 15.0) estadoSistema = 1;
-    else estadoSistema = 0;
-
-    // PAUSA POR HUMEDAD (SOLO SI TODO OK)
-    if (estadoSistema == 0 && estadoControl == 1 && !isnan(hExt)) {
-
-      if (hExt < humedadObjetivo - 2) {
-        pausaHumedad = true;
-      } else if (hExt > humedadObjetivo + 2) {
-        pausaHumedad = false;
-      }
-
-      if (pausaHumedad) {
-        estadoSistema = 4;
-      }
-    }
-
-
-
-    // =========================
-    // ACUMULAR PROMEDIOS
-    // =========================
-    sumaCorriente += I;
-    pwm = constrain(pwm, 0, 255);
-    sumaPWM += pwm;
-
-    suma_tExt += tExt;
-    suma_tInt += tInt;
-    suma_hExt += hExt;
-    suma_hInt += hInt;
-    suma_c12 += c12;
-    suma_c1 += c1;
-    suma_c2 += c2;
-    sumaRocio += puntoRocio;
-
-    if (estadoControl == 1 && !modoManual) {
-      sumaError += error;
-    }
-
-    contadorMuestras++;
   }
 
   // =========================
   // CONTROL
   // =========================
   if (TA - TControl >= intervaloControl) {
+
     TControl = TA;
 
-    // =========================
-    // REPOSO (PRIORIDAD MÁXIMA)
-    // =========================
-    if (estadoControl == 0) {
-
-      pwm = 0;
-      Vel_PWM_A = 0;
-      Vel_PWM_B = 0;
-
-      errorAcumulado = 0;
-
-      pausaHumedad = false;
-      estadoSistema = 0;
-
-      humedadObjetivo = 0;
-      pwmProm = 0;
-      corrienteProm = 0;
-      sumaPWM = 0;
-      sumaCorriente = 0;
-    }
-
-    // =========================
-    // PAUSA HUMEDAD
-    // =========================
-    else if (pausaHumedad) {
-
-      pwm = 0;
-      Vel_PWM_A = 0;
-      Vel_PWM_B = 0;
-      errorAcumulado = 0;
-    }
-
-    // =========================
-    // CONTROL NORMAL
-    // =========================
-    else {
-
-      bool sobrecorriente = (I > 15.0);
-
-      if (sobrecorriente) {
-
-        pwm = 0;
-        Vel_PWM_A = 0;
-        Vel_PWM_B = 0;
-        errorAcumulado = 0;
-      }
-
-      // =========================
-      // CONTROL AUTOMÁTICO
-      // =========================
-      if (!modoManual && estadoSistema == 0 && !sobrecorriente) {
-
-        if (!isnan(c12) && !isnan(tExt) && !isnan(hExt)) {
-
-          error = puntoRocio - c12;
-
-          float dt_control = ((millis() - tiempoAnterior) / 1000.0) * factor_tiempo;
-          tiempoAnterior = millis();
-
-          if (pwm > 0 && pwm < 255) {
-            errorAcumulado += error * dt_control;
-          }
-
-          errorAcumulado = constrain(errorAcumulado, -maxIntegracion, maxIntegracion);
-
-          float salidaPI = kp * error + ki * errorAcumulado;
-          float tempObjetivo = salidaPI + c12;
-
-          pwm = (tempObjetivo - 28.0) / -0.0745;
-          pwm = constrain(pwm, 0, 255);
-        } else {
-          pwm = 0;
-          errorAcumulado = 0;
-        }
-
-        if (abs(pwm - pwmAnterior) > 2) {
-          pwmAnterior = pwm;
-        }
-
-      }
-      // =========================
-      // MODO MANUAL
-      // =========================
-      else if (modoManual && !sobrecorriente) {
-
-        pwm = constrain(pwmManual, 0, 255);  // límite seguro
-        pwmAnterior = pwm;
-      }
-    }
+    ejecutarControl();
   }
-
 
   // =========================
   // ENVÍO SERIAL
   // =========================
-  // =========================
-  // ENVÍO SERIAL (ESCALADO x100 SIN VARIABLES EXTRA)
-  // =========================
   if (TA - TSerial >= intervaloSerial) {
     TSerial = TA;
 
-    // =========================
-    // CALCULAR PROMEDIOS
-    // =========================
-    if (contadorMuestras > 0) {
-
-      corrienteProm = sumaCorriente / contadorMuestras;
-      pwmProm = sumaPWM / contadorMuestras;
-
-      tExtProm = suma_tExt / contadorMuestras;
-      tIntProm = suma_tInt / contadorMuestras;
-      hExtProm = suma_hExt / contadorMuestras;
-      hIntProm = suma_hInt / contadorMuestras;
-      c12Prom = suma_c12 / contadorMuestras;
-      c1Prom = suma_c1 / contadorMuestras;
-      c2Prom = suma_c2 / contadorMuestras;
-      rocProm = sumaRocio / contadorMuestras;
-      errorProm = sumaError / contadorMuestras;
-    }
-
-    espSerial.print((long)(tExtProm * 100));
-    espSerial.print(",");
-    espSerial.print((long)(hExtProm * 100));
-    espSerial.print(",");
-    espSerial.print((long)(tIntProm * 100));
-    espSerial.print(",");
-    espSerial.print((long)(hIntProm * 100));
-    espSerial.print(",");
-    espSerial.print((long)(c1Prom * 100));
-    espSerial.print(",");
-    espSerial.print((long)(c2Prom * 100));
-    espSerial.print(",");
-    espSerial.print((long)(c12Prom * 100));
-    espSerial.print(",");
-    espSerial.print((long)(rocProm * 100));
-    espSerial.print(",");
-    espSerial.print((long)(errorProm * 100));
-    espSerial.print(",");
-    espSerial.print((int)(pwmProm));
-    espSerial.print(",");
-    espSerial.print(Vel_PWM_A);
-    espSerial.print(",");
-    espSerial.print(Vel_PWM_B);
-    espSerial.print(",");
-    espSerial.print((long)(corrienteProm * 100));
-    espSerial.print(",");
-    espSerial.println(estadoSistema);
-
-    // =========================
-    // RESET PROMEDIOS
-    // =========================
-    sumaCorriente = 0;
-    sumaPWM = 0;
-
-    suma_tExt = 0;
-    suma_tInt = 0;
-    suma_hExt = 0;
-    suma_hInt = 0;
-    suma_c12 = 0;
-    suma_c1 = 0;
-    suma_c2 = 0;
-    sumaRocio = 0;
-    sumaError = 0;
-
-    contadorMuestras = 0;
+    enviarDatos();
   }
 }
