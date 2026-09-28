@@ -31,16 +31,9 @@ def release_conn(conn):
 
 
 # =========================
-# HOME
-# =========================
-@app.route('/')
-def home():
-    return "API funcionando 🚀"
-
-# =========================
 # DASHBOARD
 # =========================
-@app.route('/dashboard')
+@app.route('/')
 def dashboard():
     return render_template('index.html')
 
