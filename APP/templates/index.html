@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+!DOCTYPE html>
 <html lang="es">
 
 <head>
@@ -57,7 +57,7 @@ function supaHeaders() {
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Placa Fría 2</p><h2 id="c2">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Promedio Placas</p><h2 id="c12">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🎛️ Energía en Peltiers</p><h2 id="pwm">--</h2></div>
-        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>⚡ Corriente en Peltiers</p><h2 id="corriente">--</h2></div>
+        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>⚡ Potencia en Sistema</p><h2 id="corriente">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>💧 Punto de Rocío</p><h2 id="rocio">--</h2>
 </div>
     </div>
@@ -586,23 +586,15 @@ async function cargarDatos() {
     c12.innerText = live.c12 + " °C";
 
     pwm.innerText = (Number(live.pwm) * 100 / 255).toFixed(1) + " %";
-    corriente.innerText = live.corriente + " A";
+    corriente.innerText = live.corriente + " W";
     rocio.innerText = live.puntorocio + " °C";
 
         // 🔥 ESTADO REAL DEL ARDUINO (DESDE /live)
-    if (live.estado == 4) {
+    if (live.estado == 2) {
         estadoSistema.innerText = "🟠 ESPERANDO HUMEDAD";
         estadoSistema.className = "text-orange-400 font-bold";
     }
     else if (live.estado == 1) {
-        estadoSistema.innerText = "🔴 SOBRECORRIENTE";
-        estadoSistema.className = "text-red-500 font-bold";
-    }
-    else if (live.estado == 2) {
-        estadoSistema.innerText = "🟠 ALTA TEMPERATURA";
-        estadoSistema.className = "text-orange-500 font-bold";
-    }
-    else if (live.estado == 3) {
         estadoSistema.innerText = "⚠️ ERROR SENSORES";
         estadoSistema.className = "text-yellow-400 font-bold";
     }
