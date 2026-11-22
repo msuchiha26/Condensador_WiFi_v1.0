@@ -193,7 +193,7 @@ def download():
         # 🔥 traer datos
         cur.execute("""
             SELECT timestamp, tExt, hExt, tInt, hInt,
-                c1, c2, c12, puntoRocio, error,
+                c1, c2, c12, h1, h2, h12, dt, puntoRocio, error,
                 pwm, velA, velB, corriente, estado
             FROM datos
             WHERE experiment_id = %s
@@ -226,13 +226,13 @@ def download():
 
             header = [
                 "timestamp","tExt","hExt","tInt","hInt",
-                "c1","c2","c12","puntoRocio","error",
+                "c1","c2","c12","h1","h2","h12","dT","puntoRocio","error",
                 "pwm","velA","velB","corriente","estado"
             ]
             yield ",".join(header) + "\n"
 
             for r in rows:
-                yield ",".join([str(x) for x in r]) + "\n"
+                yield ",".join(["" if x is None else str(x) for x in r]) + "\n"
 
         return Response(
             generate(),

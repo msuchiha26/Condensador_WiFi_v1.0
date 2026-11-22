@@ -56,6 +56,10 @@ function supaHeaders() {
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Placa Fría 1</p><h2 id="c1">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Placa Fría 2</p><h2 id="c2">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>❄️ Promedio Placas</p><h2 id="c12">--</h2></div>
+        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🔥 Cara Caliente 1</p><h2 id="caliente1">--</h2></div>
+        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🔥 Cara Caliente 2</p><h2 id="caliente2">--</h2></div>
+        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🔥 Promedio Caras Calientes</p><h2 id="caliente12">--</h2></div>
+        <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🌡️ Diferencia Caliente - Fría (ΔT)</p><h2 id="deltaT">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>🎛️ Energía en Peltiers</p><h2 id="pwm">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>⚡ Potencia en Sistema</p><h2 id="corriente">--</h2></div>
         <div class="bg-gray-800 p-4 rounded-xl shadow-xl border border-gray-700"><p>💧 Punto de Rocío</p><h2 id="rocio">--</h2>
@@ -382,6 +386,18 @@ function limpiarNumerico(input) {
 }
 
 // =========================
+// MOSTRAR VALOR (muestra -- si el dato no ha llegado)
+// =========================
+function mostrarValor(valor, unidad) {
+
+    if (valor === null || valor === undefined) {
+        return "--";
+    }
+
+    return valor + unidad;
+}
+
+// =========================
 // LIMPIAR SENSORES
 // =========================
 function limpiarSensores() {
@@ -395,6 +411,11 @@ function limpiarSensores() {
     c1.innerText = "--";
     c2.innerText = "--";
     c12.innerText = "--";
+
+    caliente1.innerText = "--";
+    caliente2.innerText = "--";
+    caliente12.innerText = "--";
+    deltaT.innerText = "--";
 
     pwm.innerText = "--";
 
@@ -584,6 +605,11 @@ async function cargarDatos() {
     c1.innerText = live.c1 + " °C";
     c2.innerText = live.c2 + " °C";
     c12.innerText = live.c12 + " °C";
+
+    caliente1.innerText = mostrarValor(live.h1, " °C");
+    caliente2.innerText = mostrarValor(live.h2, " °C");
+    caliente12.innerText = mostrarValor(live.h12, " °C");
+    deltaT.innerText = mostrarValor(live.dt, " °C");
 
     pwm.innerText = (Number(live.pwm) * 100 / 255).toFixed(1) + " %";
     corriente.innerText = live.corriente + " W";
